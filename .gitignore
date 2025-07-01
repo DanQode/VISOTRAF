@@ -1,0 +1,11 @@
+
+---
+
+##  `.gitignore` (para evitar subir archivos innecesarios)
+
+```txt
+__pycache__/
+*.pyc
+.env
+.DS_Store
+*.ipynb_checkpoints/
