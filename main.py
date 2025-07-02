@@ -1,10 +1,7 @@
-from src.modelo_ia import ModeloSemaforoIA
+from src.vision_vehicular import procesar_video
 
-modelo = ModeloSemaforoIA()
-modelo.entrenar()  # Entrenamiento con datos simulados
-modelo.mostrar_coeficientes()  # Mostrar fórmula del modelo
-modelo.graficar_resultado()    # Ver predicción vs realidad
+procesar_video(
+    video_path=r"C:\Users\HP\Downloads\TESIS_CODE\data\video_interseccion.mp4",
+    salto_frames=1  # Importante para no saltarte frames en video corto
+)
 
-# Prueba con valores de ejemplo
-tiempo = modelo.predecir(vehiculos=50, carriles=2)
-print(f"Tiempo verde recomendado: {tiempo:.2f} segundos")

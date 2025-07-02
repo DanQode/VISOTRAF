@@ -4,6 +4,9 @@ scikit-learn
 matplotlib
 torch
 opencv-python
+ultralytics
+
+
 ## Uso
 ##bash
 ##pip install -r requirements.txt
