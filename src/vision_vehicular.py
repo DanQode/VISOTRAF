@@ -7,7 +7,7 @@ import datetime
 model = YOLO("yolov8n.pt")  # Modelo ligero para detección rápida
 vehicle_classes = ['car', 'bus', 'truck']
 
-def procesar_video(video_path, output_csv=None, salto_frames=3):
+def procesar_video(video_path, output_csv=None, salto_frames=3, visualizar=False):
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"No se encontró el video: {video_path}")
 
@@ -28,17 +28,31 @@ def procesar_video(video_path, output_csv=None, salto_frames=3):
         if frame_num % salto_frames != 0:
             continue
 
-        print(f"Procesando frame {frame_num}...")
-
         results = model(frame, verbose=False)[0]
-        num_vehiculos = sum(
-            1 for box in results.boxes
-            if results.names[int(box.cls[0])] in vehicle_classes
-        )
+        num_vehiculos = 0
+
+        for box in results.boxes:
+            class_id = int(box.cls[0])
+            class_name = results.names[class_id]
+            conf = float(box.conf[0])  # Probabilidad/confianza
+            if class_name in vehicle_classes:
+                num_vehiculos += 1
+                # Dibuja el bounding box y la etiqueta con probabilidad
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                label = f"{class_name} {conf:.2f}"
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
         conteo.append({'frame': frame_num, 'vehiculos_detectados': num_vehiculos})
 
+        if visualizar:
+            cv2.imshow('Detección de Vehículos', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
     cap.release()
+    cv2.destroyAllWindows()
     df = pd.DataFrame(conteo)
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
     df.to_csv(output_csv, index=False)
