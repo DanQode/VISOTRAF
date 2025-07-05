@@ -1,8 +1,12 @@
 from src.vision_vehicular import procesar_video
+import sys
+from PyQt5.QtWidgets import QApplication
+from dashboard_qt import VideoDashboard  # Asegúrate de tener dashboard_qt.py en tu proyecto
 
-procesar_video(
-    video_path=r"C:\Users\HP\Downloads\TESIS_CODE\data\video_interseccion.mp4",
-    salto_frames=1,
-    visualizar=True
-)
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = VideoDashboard()
+    window.resize(1100, 600)
+    window.show()
+    sys.exit(app.exec_())
 
