@@ -6,7 +6,6 @@ from dashboard_qt import VideoDashboard  # Asegúrate de tener dashboard_qt.py e
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = VideoDashboard()
-    window.resize(1100, 600)
-    window.show()
+    window.showMaximized()  # Esto es suficiente
     sys.exit(app.exec_())
 
