@@ -169,12 +169,12 @@ class VideoDashboard(QWidget):
         self.views["Sur"] = VideoView("Sur")
         grid.addWidget(self.views["Sur"], 1, 1)
 
-        # Si tienes un layout principal, agrégale el grid:
+        # Panel izquierdo: título y grid
         main_layout = QVBoxLayout()
+        main_layout.addLayout(title_layout)
         main_layout.addLayout(grid)
-        self.setLayout(main_layout)
 
-        # Botones de acción a la derecha
+        # Panel derecho: botones y dos frames informativos alargados y delgados
         action_layout = QVBoxLayout()
         self.global_start_btn = QPushButton("Iniciar todos")
         self.global_start_btn.setFixedSize(110, 32)
@@ -184,8 +184,36 @@ class VideoDashboard(QWidget):
         self.global_stop_btn.setFixedSize(110, 32)
         self.global_stop_btn.clicked.connect(self.detener_todos)
         action_layout.addWidget(self.global_stop_btn)
+
+        # Frame: Conteo de vehículos (delgado y alargado)
+        self.count_box = QGroupBox("Conteo de vehículos")
+        self.count_box.setMinimumWidth(180)
+        self.count_box.setMaximumWidth(200)
+        self.count_box.setMinimumHeight(300)
+        self.count_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        count_layout = QVBoxLayout()
+        self.count_label = QLabel("Aquí irá el conteo de vehículos por dirección.")
+        self.count_label.setWordWrap(True)
+        count_layout.addWidget(self.count_label)
+        self.count_box.setLayout(count_layout)
+        action_layout.addWidget(self.count_box)
+
+        # Frame: Resultado VISOTRAF (delgado y alargado)
+        self.result_box = QGroupBox("Resultado VISOTRAF")
+        self.result_box.setMinimumWidth(180)
+        self.result_box.setMaximumWidth(200)
+        self.result_box.setMinimumHeight(300)
+        self.result_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        result_layout = QVBoxLayout()
+        self.result_label = QLabel("Aquí irá el resultado del análisis VISOTRAF.")
+        self.result_label.setWordWrap(True)
+        result_layout.addWidget(self.result_label)
+        self.result_box.setLayout(result_layout)
+        action_layout.addWidget(self.result_box)
+
         action_layout.addStretch(1)
-        # Coloca los botones a la derecha
+
+        # Layout horizontal principal
         h_layout = QHBoxLayout()
         h_layout.addLayout(main_layout, 4)
         h_layout.addLayout(action_layout, 1)
