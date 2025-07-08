@@ -112,6 +112,7 @@ class VideoView(QWidget):
     def detect_vehicles(self, frame):
         results = model(frame, conf=0.4, verbose=False)[0]
         obj_id = 1
+        self.count = 0  # Inicializa el conteo en cada frame
         for box in results.boxes:
             class_id = int(box.cls[0])
             class_name = results.names[class_id]
@@ -123,6 +124,7 @@ class VideoView(QWidget):
                 cv2.putText(frame, label, (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (241, 196, 15), 2)
                 obj_id += 1
+                self.count += 1  # Suma 1 por cada vehículo detectado
         return frame
 
     def show_frame(self, frame):
@@ -219,6 +221,13 @@ class VideoDashboard(QWidget):
         h_layout.addLayout(action_layout, 1)
         self.setLayout(h_layout)
 
+        # Timer para actualización de conteo
+        self.tiempo_restante = 10
+        self.timer_conteo = QTimer()
+        self.timer_conteo.timeout.connect(self.actualizar_conteo_vehiculos)
+        self.timer_conteo.start(1000)
+        self.actualizar_conteo_vehiculos(inicial=True)
+
     def iniciar_todos(self):
         for view in self.views.values():
             view.start_video()
@@ -229,6 +238,34 @@ class VideoDashboard(QWidget):
                 view.timer.stop()
                 view.cap.release()
                 view.label.setText(f"{view.direccion}\n(Detenido)")
+
+    def actualizar_conteo_vehiculos(self, inicial=False):
+        if not inicial:
+            self.tiempo_restante -= 1
+        if self.tiempo_restante <= 0 or inicial:
+            conteos = {
+                "Norte": getattr(self.views["Norte"], "count", 0),
+                "Sur": getattr(self.views["Sur"], "count", 0),
+                "Este": getattr(self.views["Este"], "count", 0),
+                "Oeste": getattr(self.views["Oeste"], "count", 0),
+            }
+            texto = (
+                f"Conteo de vehículos (actualizado):\n"
+                f"Norte: {conteos['Norte']}\n"
+                f"Sur: {conteos['Sur']}\n"
+                f"Este: {conteos['Este']}\n"
+                f"Oeste: {conteos['Oeste']}\n"
+            )
+            self.count_label.setText(texto)
+            self.tiempo_restante = 10
+        self.count_box.setTitle(f"Conteo de vehículos - Próxima lectura en {self.tiempo_restante}s")
+        self.result_label.setText(
+    "Predicción IA:\n"
+    "    Verde Norte-Sur: 60\n"
+    "    Verde Este-Oeste:  15\n"
+    "    Rojo Sur-Norte: 15\n"
+    "    Rojo OeEste-Este: 10"
+)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
