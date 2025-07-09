@@ -1,8 +1,8 @@
 import sys
 import cv2
-import csv
 import os
 import shutil
+import csv
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
@@ -236,6 +236,11 @@ class VideoDashboard(QWidget):
         self.timer_conteo.start(1000)
         self.actualizar_conteo_vehiculos(inicial=True)
 
+        # Temporizador dedicado para guardar conteos cada 10 segundos
+        self.timer_guardado = QTimer()
+        self.timer_guardado.timeout.connect(self.guardar_conteo_periodico)
+        self.timer_guardado.start(10000)  # 10,000 ms = 10 segundos
+
     def iniciar_todos(self):
         for view in self.views.values():
             view.start_video()
@@ -246,6 +251,15 @@ class VideoDashboard(QWidget):
                 view.timer.stop()
                 view.cap.release()
                 view.label.setText(f"{view.direccion}\n(Detenido)")
+
+    def guardar_conteo_periodico(self):
+        conteos = {
+            "Norte": getattr(self.views["Norte"], "count", 0),
+            "Sur": getattr(self.views["Sur"], "count", 0),
+            "Este": getattr(self.views["Este"], "count", 0),
+            "Oeste": getattr(self.views["Oeste"], "count", 0),
+        }
+        self.guardar_conteo_csv(conteos)
 
     def guardar_conteo_csv(self, conteos):
         archivo = "conteo_vehiculos.csv"
@@ -282,13 +296,9 @@ class VideoDashboard(QWidget):
             )
             self.count_label.setText(texto)
             self.tiempo_restante = 10
-        self.count_box.setTitle(f"Conteo de vehículos - Próxima lectura en {self.tiempo_restante}s")
+        self.count_box.setTitle(f"Conteo de vehículos-{self.tiempo_restante}s")
         self.result_label.setText(
-            "Predicción IA:\n"
-            "    Verde Norte-Sur: 60\n"
-            "    Verde Este-Oeste:  15\n"
-            "    Rojo Norte-Sur: 15\n"
-            "    Rojo Este-Oeste: 10"
+            ""
         )
 
     def exportar_historico(self):
