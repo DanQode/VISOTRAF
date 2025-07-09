@@ -12,6 +12,8 @@ from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, Qt
 from src.vision_vehicular import model, vehicle_classes
 
+
+
 DIRECCIONES = ["Norte", "Sur", "Este", "Oeste"]
 
 class VideoView(QWidget):
@@ -297,7 +299,7 @@ class VideoDashboard(QWidget):
             self.count_label.setText(texto)
             self.tiempo_restante = 10
         self.count_box.setTitle(f"Conteo de vehículos-{self.tiempo_restante}s")
-        self.result_label.setText("")
+        
 
     def exportar_historico(self):
         archivo_origen = "conteo_vehiculos.csv"
