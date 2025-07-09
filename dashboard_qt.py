@@ -1,8 +1,12 @@
 import sys
 import cv2
+import csv
+import os
+import shutil
+from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
-    QLineEdit, QTextEdit, QGridLayout, QGroupBox, QSizePolicy
+    QLineEdit, QGridLayout, QGroupBox, QSizePolicy, QMessageBox
 )
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, Qt
@@ -186,6 +190,10 @@ class VideoDashboard(QWidget):
         self.global_stop_btn.setFixedSize(110, 32)
         self.global_stop_btn.clicked.connect(self.detener_todos)
         action_layout.addWidget(self.global_stop_btn)
+        self.export_btn = QPushButton("Exportar histórico")
+        self.export_btn.setFixedSize(140, 32)
+        self.export_btn.clicked.connect(self.exportar_historico)
+        action_layout.addWidget(self.export_btn)
 
         # Frame: Conteo de vehículos (delgado y alargado)
         self.count_box = QGroupBox("Conteo de vehículos")
@@ -239,6 +247,21 @@ class VideoDashboard(QWidget):
                 view.cap.release()
                 view.label.setText(f"{view.direccion}\n(Detenido)")
 
+    def guardar_conteo_csv(self, conteos):
+        archivo = "conteo_vehiculos.csv"
+        existe = os.path.isfile(archivo)
+        with open(archivo, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not existe:
+                writer.writerow(["timestamp", "Norte", "Sur", "Este", "Oeste"])
+            writer.writerow([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                conteos["Norte"],
+                conteos["Sur"],
+                conteos["Este"],
+                conteos["Oeste"]
+            ])
+
     def actualizar_conteo_vehiculos(self, inicial=False):
         if not inicial:
             self.tiempo_restante -= 1
@@ -249,6 +272,7 @@ class VideoDashboard(QWidget):
                 "Este": getattr(self.views["Este"], "count", 0),
                 "Oeste": getattr(self.views["Oeste"], "count", 0),
             }
+            self.guardar_conteo_csv(conteos)
             texto = (
                 f"Conteo de vehículos (actualizado):\n"
                 f"Norte: {conteos['Norte']}\n"
@@ -260,12 +284,30 @@ class VideoDashboard(QWidget):
             self.tiempo_restante = 10
         self.count_box.setTitle(f"Conteo de vehículos - Próxima lectura en {self.tiempo_restante}s")
         self.result_label.setText(
-    "Predicción IA:\n"
-    "    Verde Norte-Sur: 60\n"
-    "    Verde Este-Oeste:  15\n"
-    "    Rojo Sur-Norte: 15\n"
-    "    Rojo OeEste-Este: 10"
-)
+            "Predicción IA:\n"
+            "    Verde Norte-Sur: 60\n"
+            "    Verde Este-Oeste:  15\n"
+            "    Rojo Norte-Sur: 15\n"
+            "    Rojo Este-Oeste: 10"
+        )
+
+    def exportar_historico(self):
+        archivo_origen = "conteo_vehiculos.csv"
+        if not os.path.exists(archivo_origen):
+            QMessageBox.warning(self, "Exportar histórico", "No existe archivo de datos históricos.")
+            return
+        # Genera nombre con fecha y hora
+        fecha_hora = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nombre_archivo = f"conteo_vehiculos_export_{fecha_hora}.csv"
+        destino, _ = QFileDialog.getSaveFileName(
+            self,
+            "Guardar histórico como...",
+            nombre_archivo,
+            "CSV Files (*.csv)"
+        )
+        if destino:
+            shutil.copyfile(archivo_origen, destino)
+            QMessageBox.information(self, "Exportar histórico", f"Archivo exportado correctamente como:\n{os.path.basename(destino)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
