@@ -5,7 +5,7 @@ import time
 from collections import deque
 from datetime import datetime
 import os
-from src.prediccion_AI import TrafficPredictor
+
 
 class TrafficPredictor:
     def __init__(self):

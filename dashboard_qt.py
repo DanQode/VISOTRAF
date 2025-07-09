@@ -11,6 +11,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, Qt
 from src.vision_vehicular import model, vehicle_classes
+from src.prediccion_AI import TrafficPredictor
+from threading import Thread, Lock
+import time
 
 
 
@@ -24,6 +27,11 @@ class VideoView(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
         self.frame_num = 0
+
+        # --- Hilos ---
+        self.running = False
+        self.frame_for_display = None
+        self.lock = Lock()
 
         # Layout principal de la vista
         layout = QVBoxLayout()
@@ -82,7 +90,6 @@ class VideoView(QWidget):
         input_btn_layout.addWidget(self.start_btn)
 
         layout.addLayout(input_btn_layout)
-
         self.setLayout(layout)
 
     def select_file(self):
@@ -103,17 +110,34 @@ class VideoView(QWidget):
                 self.show_frame(img)
         else:
             self.cap = cv2.VideoCapture(source if not source.isdigit() else int(source))
-            self.timer.start(40)  # ~25 FPS
+            self.running = True
+            self.proc_thread = Thread(target=self.process_frames, daemon=True)
+            self.proc_thread.start()
+            self.timer.start(40)  # Solo para visualización
 
-    def next_frame(self):
-        if self.cap:
+    def process_frames(self):
+        while self.running and self.cap and self.cap.isOpened():
             ret, frame = self.cap.read()
             if not ret:
-                self.timer.stop()
-                self.label.setText(f"{self.direccion}\n(Fin o error)")
-                return
-            frame = self.detect_vehicles(frame)
+                break
+            processed_frame = self.detect_vehicles(frame)
+            with self.lock:
+                self.frame_for_display = processed_frame.copy()
+            time.sleep(0.01)  # Pequeña pausa para no saturar CPU
+
+    def next_frame(self):
+        with self.lock:
+            frame = self.frame_for_display.copy() if self.frame_for_display is not None else None
+        if frame is not None:
             self.show_frame(frame)
+
+    def stop_video(self):
+        self.running = False
+        if hasattr(self, 'proc_thread'):
+            self.proc_thread.join(timeout=1)
+        self.timer.stop()
+        if self.cap:
+            self.cap.release()
 
     def detect_vehicles(self, frame):
         results = model(frame, conf=0.4, verbose=False)[0]
@@ -231,6 +255,7 @@ class VideoDashboard(QWidget):
         h_layout.addLayout(action_layout, 1)
         self.setLayout(h_layout)
 
+        self.predictor = TrafficPredictor()
         # Timer para actualización de conteo
         self.tiempo_restante = 10
         self.timer_conteo = QTimer()
@@ -243,16 +268,15 @@ class VideoDashboard(QWidget):
         self.timer_guardado.timeout.connect(self.guardar_conteo_periodico)
         self.timer_guardado.start(10000)  # 10,000 ms = 10 segundos
 
+        
     def iniciar_todos(self):
         for view in self.views.values():
             view.start_video()
 
     def detener_todos(self):
         for view in self.views.values():
-            if view.cap:
-                view.timer.stop()
-                view.cap.release()
-                view.label.setText(f"{view.direccion}\n(Detenido)")
+            view.stop_video()
+            view.label.setText(f"{view.direccion}\n(Detenido)")
 
     def guardar_conteo_periodico(self):
         conteos = {
@@ -297,8 +321,23 @@ class VideoDashboard(QWidget):
                 f"Oeste: {conteos['Oeste']}\n"
             )
             self.count_label.setText(texto)
+            # --- Predicción de tiempos de semáforo ---
+            predictions, cycle_sequence = self.predictor.predict_green_times(conteos)
+            total_cycle_time = sum(phase['duration'] for phase in cycle_sequence)
+            texto_prediccion = (
+                f"Predicción de tiempos:\n\n"
+                f"Norte-Sur:\n"
+                f"  Principal: {predictions['main']['ns']:.1f}s\n"
+                f"  Giro: {predictions['turn']['ns']:.1f}s\n\n"
+                f"Este-Oeste:\n"
+                f"  Principal: {predictions['main']['eo']:.1f}s\n"
+                f"  Giro: {predictions['turn']['eo']:.1f}s\n\n"
+                f"Tiempo total ciclo: {total_cycle_time:.1f}s"
+            )
+            self.result_label.setText(texto_prediccion)
+            # -----------------------------------------
             self.tiempo_restante = 10
-        self.count_box.setTitle(f"Conteo de vehículos-{self.tiempo_restante}s")
+        self.count_box.setTitle(f"Conteo de vehículos - {self.tiempo_restante}s")
         
 
     def exportar_historico(self):
