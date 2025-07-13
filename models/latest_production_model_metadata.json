@@ -1,0 +1,27 @@
+{
+  "created_at": "2025-07-13 04:58:38",
+  "sequence_length": 8,
+  "feature_names": [
+    "vehicles_north_straight",
+    "vehicles_north_left",
+    "vehicles_south_straight",
+    "vehicles_south_left",
+    "vehicles_east_straight",
+    "vehicles_east_left",
+    "vehicles_west_straight",
+    "vehicles_west_left",
+    "time_ns_pedestrian",
+    "time_ew_pedestrian",
+    "hour_sin",
+    "hour_cos",
+    "day_sin",
+    "day_cos"
+  ],
+  "target_columns": [
+    "time_ns_straight",
+    "time_ns_left",
+    "time_ew_straight",
+    "time_ew_left"
+  ],
+  "tensorflow_version": "2.19.0"
+}

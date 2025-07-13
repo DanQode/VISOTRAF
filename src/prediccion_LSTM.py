@@ -1,633 +1,494 @@
 """
-Módulo de predicción de tiempos de semáforo utilizando LSTM
-Compatible con Intel i7-1255U, 12GB RAM
+Adaptador para predicción de tiempos de semáforo usando LSTM con estabilización
 """
 
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import tensorflow as tf
 import os
-import time
+import pandas as pd
 from datetime import datetime
-import warnings
-warnings.filterwarnings('ignore')
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler
+import time
 
-# Configuraciones de optimización para CPU Intel
-os.environ["OMP_NUM_THREADS"] = "10"  # Optimizado para tu i7-1255U (10 núcleos)
-os.environ["KMP_BLOCKTIME"] = "0"
-os.environ["KMP_SETTINGS"] = "1"
-os.environ["KMP_AFFINITY"] = "granularity=fine,verbose,compact,1,0"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Forzar uso de CPU
-
-# Configuración específica para TensorFlow
-try:
-    tf.config.threading.set_intra_op_parallelism_threads(6)
-    tf.config.threading.set_inter_op_parallelism_threads(2)
-except:
-    pass
-
-class TrafficLightPredictor:
+class LSTMTrafficPredictor:
     """
-    Predictor de tiempos de semáforo basado en LSTM optimizado para CPU
+    Clase adaptadora para integrar la predicción LSTM con el dashboard
     """
-    
-    def __init__(self, sequence_length=12, model_path="models/lstm_traffic_light_model.h5"):
+    def __init__(self, model_path=None, sequence_length=8):
         """
-        Inicializa el predictor LSTM
+        Inicializa el predictor de tiempos de semáforo
         
         Args:
-            sequence_length: Número de pasos temporales para predecir
-            model_path: Ruta donde guardar/cargar el modelo
+            model_path: Ruta al modelo LSTM entrenado
+            sequence_length: Longitud de secuencia que espera el modelo LSTM
         """
-        self.sequence_length = sequence_length
-        self.model_path = model_path
         self.model = None
+        self.model_path = model_path or "models/lstm_traffic_light_model20250713_045748.h5"
         self.scaler_X = MinMaxScaler(feature_range=(0, 1))
         self.scaler_y = MinMaxScaler(feature_range=(0, 1))
-        self.feature_names = None
+        self.sequence_length = sequence_length
         
-        print(f"Inicializando LSTM para predicción de tiempos de semáforo (secuencia={sequence_length})")
-        print(f"TensorFlow: {tf.__version__}")
+        # Historial de datos para mantener secuencias
+        self.data_history = []
         
-    def _create_sequences(self, data, target_columns):
-        """
-        Crea secuencias de datos para entrenamiento LSTM
-        """
-        print(f"Creando secuencias temporales (longitud={self.sequence_length})...")
-        X, y = [], []
+        # Para manejar actualizaciones frecuentes
+        self.last_prediction = None
+        self.prediction_time = None
+        self.last_update_time = time.time()
+        self.is_processing = False
         
-        # Separar features y targets
-        features = data.drop(columns=target_columns)
-        targets = data[target_columns]
+        # Historial de predicciones para suavizado
+        self.prediction_history = []
+        self.history_max_length = 5  # Mantener últimas 5 predicciones para suavizado
         
-        # Convertir a numpy arrays para mejor rendimiento
-        feature_values = features.values
-        target_values = targets.values
+        # Cargar modelo o crear uno simple para demostración
+        self.load_or_create_model()
         
-        # Crear secuencias
-        for i in range(len(data) - self.sequence_length):
-            X.append(feature_values[i:(i + self.sequence_length)])
-            y.append(target_values[i + self.sequence_length])
-            
-            # Mostrar progreso cada 5000 secuencias
-            if i % 5000 == 0 and i > 0:
-                print(f"Procesadas {i} secuencias...")
-        
-        return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
-        
-    def preprocess_data(self, df, target_columns, max_samples=None):
-        """
-        Preprocesa los datos para el modelo LSTM
-        
-        Args:
-            df: DataFrame con los datos
-            target_columns: Lista de columnas objetivo (tiempos de semáforo)
-            max_samples: Máximo número de muestras a procesar
-        """
-        print(f"Preprocesando datos ({len(df)} muestras)...")
-        
-        # Limitar el número de muestras si es necesario
-        if max_samples and len(df) > max_samples:
-            print(f"Limitando dataset a {max_samples} muestras (de {len(df)})")
-            df = df.iloc[-max_samples:]  # Usar las más recientes
-        
-        # Asegurar orden temporal
-        if 'timestamp' in df.columns:
-            df = df.sort_values('timestamp')
-            
-        # Trabajar con una copia para evitar advertencias
-        df_copy = df.copy()
-        
-        # Codificación para variables temporales
-        if 'hour' in df_copy.columns:
-            df_copy['hour_sin'] = np.sin(df_copy['hour'] * (2 * np.pi / 24)).astype(np.float32)
-            df_copy['hour_cos'] = np.cos(df_copy['hour'] * (2 * np.pi / 24)).astype(np.float32)
-            df_copy = df_copy.drop('hour', axis=1)
-        
-        if 'day' in df_copy.columns:
-            df_copy['day_sin'] = np.sin(df_copy['day'] * (2 * np.pi / 7)).astype(np.float32)
-            df_copy['day_cos'] = np.cos(df_copy['day'] * (2 * np.pi / 7)).astype(np.float32)
-            df_copy = df_copy.drop('day', axis=1)
-        
-        # One-hot encoding para variables categóricas
-        categorical_cols = ['weather', 'road_type', 'intersection_type']
-        for col in categorical_cols:
-            if col in df_copy.columns:
-                dummies = pd.get_dummies(df_copy[col], prefix=col, dtype=np.float32)
-                df_copy = pd.concat([df_copy, dummies], axis=1)
-                df_copy = df_copy.drop(col, axis=1)
-            
-        # Eliminar columnas no numéricas excepto las de objetivo
-        non_numeric_cols = df_copy.select_dtypes(exclude=np.number).columns
-        non_numeric_cols = [col for col in non_numeric_cols if col not in target_columns]
-        if len(non_numeric_cols) > 0:
-            print(f"Eliminando columnas no numéricas: {list(non_numeric_cols)}")
-            df_copy = df_copy.drop(columns=non_numeric_cols)
-        
-        # Guardar nombres de características
-        feature_cols = [col for col in df_copy.columns if col not in target_columns]
-        self.feature_names = feature_cols
-        
-        # Escalar features y targets por separado
-        X_data = df_copy[feature_cols].values
-        y_data = df_copy[target_columns].values
-        
-        X_scaled = self.scaler_X.fit_transform(X_data)
-        y_scaled = self.scaler_y.fit_transform(y_data)
-        
-        # Recrear DataFrame con datos escalados
-        X_scaled_df = pd.DataFrame(X_scaled, columns=feature_cols)
-        y_scaled_df = pd.DataFrame(y_scaled, columns=target_columns)
-        
-        # Unir para procesamiento de secuencias
-        scaled_df = pd.concat([X_scaled_df, y_scaled_df], axis=1)
-        
-        # Crear secuencias X, y para LSTM
-        X, y = self._create_sequences(scaled_df, target_columns)
-        print(f"Secuencias creadas - X: {X.shape}, y: {y.shape}")
-        
-        return X, y
-    
-    def build_model(self, input_shape, output_shape):
-        """
-        Construye la arquitectura del modelo LSTM
-        
-        Args:
-            input_shape: Forma de los datos de entrada (seq_length, n_features)
-            output_shape: Número de valores a predecir (tiempos de semáforo)
-        """
-        print("Construyendo modelo LSTM para tiempos de semáforo...")
-        
-        model = tf.keras.Sequential([
-            # Primera capa LSTM
-            tf.keras.layers.LSTM(
-                units=32,  # Aumentamos un poco para capturar relaciones complejas
-                return_sequences=True,
-                input_shape=(input_shape[1], input_shape[2]),
-                activation='tanh'
-            ),
-            tf.keras.layers.Dropout(0.2),
-            
-            # Segunda capa LSTM
-            tf.keras.layers.LSTM(
-                units=24,
-                return_sequences=False
-            ),
-            tf.keras.layers.Dropout(0.2),
-            
-            # Capa densa
-            tf.keras.layers.Dense(units=16, activation='relu'),
-            
-            # Capa de salida - múltiples tiempos de semáforo
-            tf.keras.layers.Dense(units=output_shape)
-        ])
-        
-        # Optimizador Adam con learning rate reducido
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-        
-        # Compilar modelo
-        model.compile(optimizer=optimizer, loss='mean_squared_error')
-        
-        # Mostrar resumen del modelo
-        model.summary()
-        
-        self.model = model
-        return model
-    
-    def train(self, X, y, epochs=20, batch_size=16, validation_split=0.2, verbose=1):
-        """
-        Entrena el modelo LSTM
-        """
-        if self.model is None:
-            self.build_model(X.shape, y.shape[1])
-            
-        print(f"\nEntrenando modelo LSTM - epochs={epochs}, batch_size={batch_size}...")
-            
-        # Early stopping y reducción de LR
-        callbacks = [
-            tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=7, 
-                restore_best_weights=True,
-                verbose=1
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5, 
-                patience=4, 
-                min_lr=0.0001,
-                verbose=1
-            )
+        # Definimos feature_names basados en el dataset de entrenamiento
+        self.feature_names = [
+            'vehicles_north_straight', 'vehicles_north_left',
+            'vehicles_south_straight', 'vehicles_south_left',
+            'vehicles_east_straight', 'vehicles_east_left',
+            'vehicles_west_straight', 'vehicles_west_left',
+            'hour_sin', 'hour_cos', 'day_sin', 'day_cos'
         ]
         
-        # Monitorear el tiempo de entrenamiento
-        start_time = time.time()
-        
-        # Entrenar modelo
-        history = self.model.fit(
-            X, y,
-            epochs=epochs,
-            batch_size=batch_size,
-            validation_split=validation_split,
-            callbacks=callbacks,
-            verbose=verbose,
-            shuffle=True
-        )
-        
-        # Mostrar tiempo de entrenamiento
-        training_time = time.time() - start_time
-        print(f"\nEntrenamiento completado en {training_time:.2f} segundos")
-        
-        return history
+        print(f"Inicializado LSTMTrafficPredictor (sequence_length={sequence_length})")
     
-    def evaluate(self, X_test, y_test, target_columns):
+    def load_or_create_model(self):
         """
-        Evalúa el modelo con datos de prueba
+        Carga el modelo si existe, o crea uno simple para demostración
         """
-        if self.model is None:
-            raise ValueError("El modelo no ha sido entrenado aún")
-            
-        print("\nEvaluando modelo LSTM para tiempos de semáforo...")
-            
-        # Evaluación por lotes para evitar picos de memoria
-        batch_size = 32
-        y_pred_scaled = []
-        
-        for i in range(0, len(X_test), batch_size):
-            batch_X = X_test[i:i+batch_size]
-            batch_pred = self.model.predict(batch_X, verbose=0)
-            y_pred_scaled.append(batch_pred)
-            
-        y_pred_scaled = np.vstack(y_pred_scaled)
-        
-        # Invertir el escalado para obtener valores reales
-        y_test_rescaled = self.scaler_y.inverse_transform(y_test)
-        y_pred_rescaled = self.scaler_y.inverse_transform(y_pred_scaled)
-        
-        # Calcular métricas para cada tiempo de semáforo
-        print("\nResultados de evaluación:")
-        all_mae, all_rmse, all_r2 = [], [], []
-        
-        for i, col in enumerate(target_columns):
-            mae = mean_absolute_error(y_test_rescaled[:, i], y_pred_rescaled[:, i])
-            rmse = np.sqrt(mean_squared_error(y_test_rescaled[:, i], y_pred_rescaled[:, i]))
-            r2 = r2_score(y_test_rescaled[:, i], y_pred_rescaled[:, i])
-            
-            print(f"{col}:")
-            print(f"  MAE: {mae:.2f} segundos")
-            print(f"  RMSE: {rmse:.2f} segundos")
-            print(f"  R²: {r2:.4f}")
-            
-            all_mae.append(mae)
-            all_rmse.append(rmse)
-            all_r2.append(r2)
-        
-        # Métricas promedio
-        print("\nPromedios:")
-        print(f"MAE promedio: {np.mean(all_mae):.2f} segundos")
-        print(f"RMSE promedio: {np.mean(all_rmse):.2f} segundos")
-        print(f"R² promedio: {np.mean(all_r2):.4f}")
-        
-        return y_test_rescaled, y_pred_rescaled, all_mae, all_rmse, all_r2
+        try:
+            if os.path.exists(self.model_path):
+                self.model = load_model(self.model_path)
+                print(f"Modelo LSTM cargado desde: {self.model_path}")
+            else:
+                print(f"Modelo no encontrado en {self.model_path}, usando algoritmo de fallback")
+        except Exception as e:
+            print(f"Error al cargar el modelo: {e}")
+            print("Usando algoritmo de fallback")
     
-    def predict_traffic_light_times(self, input_data):
+    def equalize_dashboard_data(self, vehicle_counts):
         """
-        Predice tiempos de semáforo para datos nuevos
+        Transforma los datos del dashboard al formato esperado por el modelo LSTM
         
         Args:
-            input_data: DataFrame con datos de entrada (conteos de vehículos por dirección)
+            vehicle_counts: Diccionario con conteo por dirección {"Norte": n, "Sur": s, "Este": e, "Oeste": w}
+        
+        Returns:
+            dict: Datos en formato compatible con el modelo LSTM
         """
-        if self.model is None:
-            raise ValueError("El modelo no ha sido entrenado o cargado")
+        # Extraer conteos básicos
+        north = vehicle_counts.get("Norte", 0)
+        south = vehicle_counts.get("Sur", 0)
+        east = vehicle_counts.get("Este", 0)
+        west = vehicle_counts.get("Oeste", 0)
+        
+        # Obtener información temporal actual
+        now = datetime.now()
+        hour = now.hour
+        day = now.weekday()  # 0=Lunes, 6=Domingo
+        
+        # Transformaciones cíclicas de hora y día
+        hour_sin = np.sin(hour * (2 * np.pi / 24))
+        hour_cos = np.cos(hour * (2 * np.pi / 24))
+        day_sin = np.sin(day * (2 * np.pi / 7))
+        day_cos = np.cos(day * (2 * np.pi / 7))
+        
+        # Distribuir conteos en movimientos (straight y left)
+        # Asumimos que 70% de vehículos van recto y 30% giran a la izquierda
+        straight_ratio = 0.7
+        left_ratio = 0.3
+        
+        # Crear diccionario con datos equalizados
+        equalized_data = {
+            'vehicles_north_straight': int(north * straight_ratio),
+            'vehicles_north_left': int(north * left_ratio),
+            'vehicles_south_straight': int(south * straight_ratio),
+            'vehicles_south_left': int(south * left_ratio),
+            'vehicles_east_straight': int(east * straight_ratio),
+            'vehicles_east_left': int(east * left_ratio),
+            'vehicles_west_straight': int(west * straight_ratio),
+            'vehicles_west_left': int(west * left_ratio),
+            'hour_sin': hour_sin,
+            'hour_cos': hour_cos,
+            'day_sin': day_sin,
+            'day_cos': day_cos
+        }
+        
+        return equalized_data
+    
+    def create_sequence(self, new_data):
+        """
+        Mantiene un historial de datos y crea una secuencia de la longitud requerida
+        
+        Args:
+            new_data: Diccionario con nuevos datos
             
-        # Preparar los datos
-        # Asumimos que input_data ya tiene el formato correcto
-        input_scaled = self.scaler_X.transform(input_data)
+        Returns:
+            np.array: Secuencia de datos preparada para el modelo LSTM
+        """
+        # Añadir nuevos datos al historial
+        self.data_history.append(new_data)
         
-        # Hacer la predicción
-        prediction_scaled = self.model.predict(np.expand_dims(input_scaled, axis=0))
+        # Mantener solo los últimos "sequence_length" registros
+        if len(self.data_history) > self.sequence_length:
+            self.data_history = self.data_history[-self.sequence_length:]
         
-        # Convertir de vuelta a la escala original
-        prediction = self.scaler_y.inverse_transform(prediction_scaled)
+        # Si no tenemos suficientes datos, duplicamos el último hasta completar
+        while len(self.data_history) < self.sequence_length:
+            self.data_history.append(new_data)
         
-        return prediction[0]  # Retornar la primera (y única) predicción
+        # Convertir a DataFrame
+        sequence_df = pd.DataFrame(self.data_history)
+        
+        # Asegurar que tenemos todas las columnas necesarias
+        for feature in self.feature_names:
+            if feature not in sequence_df.columns:
+                sequence_df[feature] = 0
+        
+        # Mantener solo las columnas que el modelo espera
+        sequence_df = sequence_df[self.feature_names]
+        
+        # Convertir a numpy array
+        sequence_array = sequence_df.values
+        
+        # Escalar datos si el modelo está disponible
+        if hasattr(self, 'scaler_X') and self.scaler_X is not None:
+            try:
+                # Intentar usar el scaler previamente ajustado
+                sequence_array = self.scaler_X.transform(sequence_array)
+            except:
+                # Si es la primera vez, ajustar el scaler
+                sequence_array = self.scaler_X.fit_transform(sequence_array)
+        
+        # Reshape para LSTM: [1, sequence_length, n_features]
+        return np.expand_dims(sequence_array, axis=0)
     
-    def save_model(self, filepath=None):
+    def smooth_predictions(self, new_prediction):
         """
-        Guarda el modelo entrenado
-        """
-        if self.model is None:
-            raise ValueError("No hay modelo para guardar")
+        Aplica suavizado exponencial a las predicciones para evitar cambios bruscos
         
-        if filepath is None:
-            filepath = self.model_path
+        Args:
+            new_prediction: Nueva predicción de tiempos
             
-        # Crear directorio si no existe
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        Returns:
+            dict: Predicción suavizada
+        """
+        # Añadir nueva predicción al historial
+        self.prediction_history.append(new_prediction)
         
-        self.model.save(filepath)
-        print(f"Modelo guardado en {filepath}")
-    
-    def load_model(self, filepath=None):
-        """
-        Carga un modelo previamente guardado
-        """
-        if filepath is None:
-            filepath = self.model_path
+        # Mantener solo las últimas N predicciones
+        if len(self.prediction_history) > self.history_max_length:
+            self.prediction_history = self.prediction_history[-self.history_max_length:]
+        
+        # Si solo tenemos una predicción, devolverla tal cual
+        if len(self.prediction_history) == 1:
+            return new_prediction
+        
+        # Crear predicción suavizada con pesos exponenciales
+        # Las predicciones más recientes tienen más peso
+        smoothed_prediction = {
+            'main': {'ns': 0, 'eo': 0},
+            'turn': {'ns': 0, 'eo': 0}
+        }
+        
+        total_weight = 0
+        
+        for i, pred in enumerate(self.prediction_history):
+            # Peso exponencial: las más recientes tienen más peso
+            weight = 2 ** i
+            total_weight += weight
             
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"No se encontró el modelo en {filepath}")
+            # Acumular valores ponderados
+            smoothed_prediction['main']['ns'] += pred['main']['ns'] * weight
+            smoothed_prediction['main']['eo'] += pred['main']['eo'] * weight
+            smoothed_prediction['turn']['ns'] += pred['turn']['ns'] * weight
+            smoothed_prediction['turn']['eo'] += pred['turn']['eo'] * weight
+        
+        # Normalizar por el peso total
+        smoothed_prediction['main']['ns'] /= total_weight
+        smoothed_prediction['main']['eo'] /= total_weight
+        smoothed_prediction['turn']['ns'] /= total_weight
+        smoothed_prediction['turn']['eo'] /= total_weight
+        
+        # Redondear a un decimal
+        smoothed_prediction['main']['ns'] = round(smoothed_prediction['main']['ns'], 1)
+        smoothed_prediction['main']['eo'] = round(smoothed_prediction['main']['eo'], 1)
+        smoothed_prediction['turn']['ns'] = round(smoothed_prediction['turn']['ns'], 1)
+        smoothed_prediction['turn']['eo'] = round(smoothed_prediction['turn']['eo'], 1)
+        
+        return smoothed_prediction
+    
+    def should_update_prediction(self, vehicle_counts):
+        """
+        Determina si debemos actualizar la predicción basado en cambios en los datos
+        
+        Args:
+            vehicle_counts: Nuevos conteos de vehículos
             
-        self.model = tf.keras.models.load_model(filepath)
-        print(f"Modelo cargado desde {filepath}")
-        return self.model
-    
-    def plot_history(self, history, save_path='outputs/traffic_light_training_history.png'):
+        Returns:
+            bool: True si debemos actualizar la predicción
         """
-        Visualiza el historial de entrenamiento
+        # Siempre actualizamos la primera vez
+        if self.last_prediction is None:
+            return True
+        
+        # Si han pasado más de 30 segundos desde la última actualización, actualizamos
+        current_time = time.time()
+        if current_time - self.last_update_time > 30:
+            return True
+            
+        # Verificar si ha habido cambios significativos en los conteos
+        if hasattr(self, 'last_vehicle_counts'):
+            significant_change = False
+            
+            # Verificar cada dirección
+            for direction in ['Norte', 'Sur', 'Este', 'Oeste']:
+                current = vehicle_counts.get(direction, 0)
+                previous = self.last_vehicle_counts.get(direction, 0)
+                
+                # Si hay un cambio de más de 2 vehículos, consideramos significativo
+                if abs(current - previous) > 2:
+                    significant_change = True
+                    break
+                    
+            return significant_change
+        
+        # Primera vez, no hay conteos previos
+        return True
+    
+    def predict_green_times(self, vehicle_counts):
         """
-        # Crear directorio si no existe
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        Predice los tiempos óptimos de semáforo en verde basados en conteo vehicular
         
-        plt.figure(figsize=(10, 5))
-        plt.plot(history.history['loss'], label='Entrenamiento')
-        plt.plot(history.history['val_loss'], label='Validación')
-        plt.title('Pérdida del modelo LSTM (Tiempos de Semáforo)')
-        plt.ylabel('Pérdida (MSE)')
-        plt.xlabel('Época')
-        plt.legend(loc='upper right')
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.tight_layout()
+        Args:
+            vehicle_counts: Diccionario con conteo por dirección {"Norte": n, "Sur": s, "Este": e, "Oeste": w}
         
-        # Guardar figura
-        plt.savefig(save_path)
-        print(f"Gráfico de entrenamiento guardado en {save_path}")
-        
-        # Mostrar figura
-        plt.show()
-    
-    def plot_predictions(self, y_true, y_pred, target_columns, save_path='outputs/traffic_light_predictions.png'):
+        Returns:
+            tuple: (predictions, cycle_sequence)
+                - predictions: Dict con tiempos para flujos principales y giros
+                - cycle_sequence: Lista de fases con sus tiempos y estados
         """
-        Visualiza las predicciones vs los valores reales
+        # Verificar si debemos actualizar la predicción
+        if not self.should_update_prediction(vehicle_counts):
+            return self.last_prediction
+            
+        # Evitar procesamiento concurrente
+        if self.is_processing:
+            return self.last_prediction if self.last_prediction else self._fallback_prediction(vehicle_counts)
+            
+        self.is_processing = True
+        self.last_vehicle_counts = vehicle_counts.copy()
+        self.last_update_time = time.time()
+            
+        try:
+            # Equalizar datos para que coincidan con el formato del dataset de entrenamiento
+            equalized_data = self.equalize_dashboard_data(vehicle_counts)
+            
+            # Crear secuencia para LSTM
+            input_sequence = self.create_sequence(equalized_data)
+            
+            # Si tenemos modelo entrenado, usarlo para predecir
+            if self.model is not None:
+                try:
+                    # Hacer predicción con el modelo LSTM
+                    prediction_scaled = self.model.predict(input_sequence, verbose=0)
+                    
+                    # Invertir el escalado para obtener tiempos reales
+                    if hasattr(self, 'scaler_y') and self.scaler_y is not None:
+                        try:
+                            prediction = self.scaler_y.inverse_transform(prediction_scaled)
+                            
+                            # Extraer predicciones (asumiendo 4 valores de salida en este orden)
+                            ns_straight_time = prediction[0][0]
+                            ns_left_time = prediction[0][1]
+                            ew_straight_time = prediction[0][2]
+                            ew_left_time = prediction[0][3]
+                            
+                            # Limitar a valores razonables
+                            ns_straight_time = max(10.0, min(60.0, ns_straight_time))
+                            ns_left_time = max(5.0, min(30.0, ns_left_time))
+                            ew_straight_time = max(10.0, min(60.0, ew_straight_time))
+                            ew_left_time = max(5.0, min(30.0, ew_left_time))
+                            
+                            # Resultados como diccionario
+                            raw_predictions = {
+                                'main': {
+                                    'ns': float(round(ns_straight_time, 1)),
+                                    'eo': float(round(ew_straight_time, 1))
+                                },
+                                'turn': {
+                                    'ns': float(round(ns_left_time, 1)),
+                                    'eo': float(round(ew_left_time, 1))
+                                }
+                            }
+                            
+                            # Aplicar suavizado para evitar cambios bruscos
+                            predictions = self.smooth_predictions(raw_predictions)
+                            
+                            # Calcular la secuencia del ciclo
+                            cycle_sequence = self._calculate_cycle_sequence(predictions)
+                            
+                            self.last_prediction = (predictions, cycle_sequence)
+                            self.is_processing = False
+                            return self.last_prediction
+                            
+                        except Exception as e:
+                            print(f"Error al invertir escalado: {e}")
+                            # Usar método de fallback
+                except Exception as e:
+                    print(f"Error en predicción LSTM: {e}")
+                    # Usar método de fallback
+            
+            # Método de fallback si no hay modelo o hay error
+            result = self._fallback_prediction(vehicle_counts)
+            self.is_processing = False
+            return result
+            
+        except Exception as e:
+            print(f"Error general en predicción: {e}")
+            self.is_processing = False
+            return self._fallback_prediction(vehicle_counts)
+    
+    def _fallback_prediction(self, vehicle_counts):
         """
-        # Crear directorio si no existe
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        Método de fallback que simula predicciones basadas en reglas simples
         
-        n_targets = len(target_columns)
-        fig, axes = plt.subplots(n_targets, 1, figsize=(12, 4*n_targets))
+        Args:
+            vehicle_counts: Diccionario con conteo por dirección
+            
+        Returns:
+            tuple: (predictions, cycle_sequence)
+        """
+        # Extraer conteos
+        north = vehicle_counts.get("Norte", 0)
+        south = vehicle_counts.get("Sur", 0)
+        east = vehicle_counts.get("Este", 0)
+        west = vehicle_counts.get("Oeste", 0)
         
-        if n_targets == 1:
-            axes = [axes]  # Hacer iterable para un solo objetivo
+        # Flujo Norte-Sur (suma de vehículos)
+        ns_flow = north + south
+        # Flujo Este-Oeste (suma de vehículos)
+        ew_flow = east + west
         
-        for i, (ax, col) in enumerate(zip(axes, target_columns)):
-            ax.plot(y_true[:, i], label='Valores reales', color='blue')
-            ax.plot(y_pred[:, i], label='Predicciones', color='red', alpha=0.7)
-            ax.set_title(f'Predicción de {col}')
-            ax.set_xlabel('Muestra')
-            ax.set_ylabel('Tiempo (segundos)')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+        # Calculamos tiempo base + factor por vehículo
+        base_time = 10.0  # segundos mínimos en verde
+        factor = 1.2      # segundos adicionales por vehículo
         
-        # Añadir detalles informativos
-        plt.figtext(0.02, 0.02, f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 
-                   ha="left", fontsize=8)
+        # Tiempo verde para movimiento recto
+        ns_straight_time = max(base_time, base_time + factor * ns_flow)
+        ew_straight_time = max(base_time, base_time + factor * ew_flow)
         
-        # Guardar figura
-        plt.tight_layout()
-        plt.savefig(save_path)
-        print(f"Gráfico de predicciones guardado en {save_path}")
+        # Tiempo para giros a la izquierda (30% del tiempo recto)
+        ns_left_time = max(base_time, ns_straight_time * 0.3)
+        ew_left_time = max(base_time, ew_straight_time * 0.3)
         
-        # Mostrar figura
-        plt.show()
+        # Tiempo mínimo de seguridad
+        min_time = 5.0
+        
+        # Ajustar tiempo mínimo
+        ns_straight_time = max(min_time, ns_straight_time)
+        ew_straight_time = max(min_time, ew_straight_time)
+        ns_left_time = max(min_time, ns_left_time)
+        ew_left_time = max(min_time, ew_left_time)
+        
+        # Resultados como diccionario
+        predictions = {
+            'main': {
+                'ns': round(ns_straight_time, 1),
+                'eo': round(ew_straight_time, 1)
+            },
+            'turn': {
+                'ns': round(ns_left_time, 1),
+                'eo': round(ew_left_time, 1)
+            }
+        }
+        
+        # Suavizado si hay predicciones anteriores
+        predictions = self.smooth_predictions(predictions)
+        
+        # Calculamos la secuencia de fases del ciclo
+        cycle_sequence = self._calculate_cycle_sequence(predictions)
+        
+        # Guardar esta predicción para futuras comparaciones
+        self.last_prediction = (predictions, cycle_sequence)
+        return self.last_prediction
+    
+    def _calculate_cycle_sequence(self, predictions):
+        """
+        Calcula la secuencia de fases del ciclo completo
+        
+        Args:
+            predictions: Diccionario con los tiempos de verde predichos
+            
+        Returns:
+            list: Lista de fases con sus tiempos y estados
+        """
+        # Tiempos de transición/amarillo
+        yellow_time = 3.0
+        
+        # Secuencia de fases (satisfaciendo la restricción de flujos perpendiculares)
+        cycle = []
+        
+        # FASE 1: NS Recto + EO Giro izquierda
+        cycle.append({
+            'name': 'NS Recto + EO Giro',
+            'duration': predictions['main']['ns'],
+            'states': {
+                'ns_straight': 'VERDE',
+                'ns_left': 'ROJO',
+                'eo_straight': 'ROJO',
+                'eo_left': 'VERDE'
+            }
+        })
+        
+        # Transición amarilla
+        cycle.append({
+            'name': 'Transición 1',
+            'duration': yellow_time,
+            'states': {
+                'ns_straight': 'AMARILLO',
+                'ns_left': 'ROJO',
+                'eo_straight': 'ROJO',
+                'eo_left': 'AMARILLO'
+            }
+        })
+        
+        # FASE 2: NS Giro izquierda + EO Recto
+        cycle.append({
+            'name': 'NS Giro + EO Recto',
+            'duration': predictions['main']['eo'],
+            'states': {
+                'ns_straight': 'ROJO',
+                'ns_left': 'VERDE',
+                'eo_straight': 'VERDE',
+                'eo_left': 'ROJO'
+            }
+        })
+        
+        # Transición amarilla
+        cycle.append({
+            'name': 'Transición 2',
+            'duration': yellow_time,
+            'states': {
+                'ns_straight': 'ROJO',
+                'ns_left': 'AMARILLO',
+                'eo_straight': 'AMARILLO',
+                'eo_left': 'ROJO'
+            }
+        })
+        
+        return cycle
 
-
-def generate_traffic_light_data(n_samples=5000):
+class TrafficPredictor:
     """
-    Genera datos sintéticos para la predicción de tiempos de semáforo
-    basados en conteo de vehículos por dirección
+    Clase compatibilidad para uso actual en dashboard
     """
-    print(f"Generando {n_samples} muestras de datos para tiempos de semáforo...")
-    
-    # Crear un índice temporal
-    start_date = pd.Timestamp('2025-01-01')
-    timestamps = [start_date + pd.Timedelta(minutes=i*10) for i in range(n_samples)]
-    
-    # Extraer características temporales
-    hours = np.array([ts.hour for ts in timestamps], dtype=np.int8)
-    days = np.array([ts.dayofweek for ts in timestamps], dtype=np.int8)
-    
-    # Generar conteo de vehículos por dirección con patrones realistas
-    np.random.seed(42)  # Para reproducibilidad
-    
-    # Base para el conteo de vehículos (varía por hora del día)
-    base_traffic = 5 + 15 * np.sin((hours - 8) * np.pi / 12) + 10 * (days < 5)
-    base_traffic = np.maximum(base_traffic, 0).astype(np.int16)
-    
-    # Conteo por dirección - con correlaciones realistas y variación
-    # Norte-Sur tiene más tráfico en promedio que Este-Oeste durante horas pico matutinas
-    lam_north = np.clip(base_traffic * 1.2 + 5 * np.sin((hours - 7) * np.pi / 12), 0, None)
-    vehicles_north = np.random.poisson(lam_north)
-
-    lam_south = np.clip(base_traffic * 1.0 + 5 * np.sin((hours - 17) * np.pi / 12), 0, None)
-    vehicles_south = np.random.poisson(lam_south)
-
-    lam_east = np.clip(base_traffic * 0.9 + 3 * np.sin((hours - 8) * np.pi / 12), 0, None)
-    vehicles_east = np.random.poisson(lam_east)
-
-    lam_west = np.clip(base_traffic * 0.8 + 3 * np.sin((hours - 16) * np.pi / 12), 0, None)
-    vehicles_west = np.random.poisson(lam_west)
-    
-    # Limitar a valores razonables
-    vehicles_north = np.clip(vehicles_north, 0, 50)
-    vehicles_south = np.clip(vehicles_south, 0, 45)
-    vehicles_east = np.clip(vehicles_east, 0, 40)
-    vehicles_west = np.clip(vehicles_west, 0, 38)
-    
-    # Movimientos: recto y giro izquierda
-    # ~70% recto, ~30% giro izquierda
-    straight_ratio_ns = 0.7 + 0.1 * np.random.random(n_samples)
-    straight_ratio_ew = 0.7 + 0.1 * np.random.random(n_samples)
-    
-    vehicles_north_straight = (vehicles_north * straight_ratio_ns).astype(int)
-    vehicles_north_left = (vehicles_north * (1 - straight_ratio_ns)).astype(int)
-    
-    vehicles_south_straight = (vehicles_south * straight_ratio_ns).astype(int)
-    vehicles_south_left = (vehicles_south * (1 - straight_ratio_ns)).astype(int)
-    
-    vehicles_east_straight = (vehicles_east * straight_ratio_ew).astype(int)
-    vehicles_east_left = (vehicles_east * (1 - straight_ratio_ew)).astype(int)
-    
-    vehicles_west_straight = (vehicles_west * straight_ratio_ew).astype(int)
-    vehicles_west_left = (vehicles_west * (1 - straight_ratio_ew)).astype(int)
-    
-    # Tiempo de semáforo basado en fórmulas realistas
-    # Ejemplo básico: tiempo_verde = base + factor_1 * vehiculos_rectos + factor_2 * vehiculos_giro
-    
-    # Parámetros
-    base_time = 10.0  # Tiempo base en segundos
-    straight_factor = 0.8  # Factor por vehículo en movimiento recto
-    left_factor = 0.5     # Factor por vehículo en giro izquierda
-    pedestrian_time = 6.0  # Tiempo fijo para peatones
-    
-    # Calcular tiempos de semáforo
-    ns_straight_time = base_time + straight_factor * vehicles_north_straight + 0.3 * straight_factor * vehicles_south_straight
-    ns_left_time = base_time + left_factor * vehicles_north_left + 0.3 * left_factor * vehicles_south_left
-    
-    ew_straight_time = base_time + straight_factor * vehicles_east_straight + 0.3 * straight_factor * vehicles_west_straight
-    ew_left_time = base_time + left_factor * vehicles_east_left + 0.3 * left_factor * vehicles_west_left
-    
-    # Añadir algo de ruido y variabilidad
-    ns_straight_time += np.random.normal(0, 2, n_samples)
-    ns_left_time += np.random.normal(0, 1, n_samples)
-    ew_straight_time += np.random.normal(0, 2, n_samples)
-    ew_left_time += np.random.normal(0, 1, n_samples)
-    
-    # Limitar a valores razonables y redondear a un decimal
-    ns_straight_time = np.round(np.clip(ns_straight_time, base_time, 60.0), 1)
-    ns_left_time = np.round(np.clip(ns_left_time, base_time, 30.0), 1)
-    ew_straight_time = np.round(np.clip(ew_straight_time, base_time, 60.0), 1)
-    ew_left_time = np.round(np.clip(ew_left_time, base_time, 30.0), 1)
-    
-    # Tiempo peatonal es constante
-    ns_pedestrian_time = np.full(n_samples, pedestrian_time)
-    ew_pedestrian_time = np.full(n_samples, pedestrian_time)
-    
-    # Crear DataFrame
-    data = pd.DataFrame({
-        'timestamp': timestamps,
-        'hour': hours,
-        'day': days,
+    def __init__(self):
+        self.lstm_predictor = LSTMTrafficPredictor()
         
-        # Conteo de vehículos por dirección y movimiento
-        'vehicles_north_straight': vehicles_north_straight,
-        'vehicles_north_left': vehicles_north_left,
-        'vehicles_south_straight': vehicles_south_straight,
-        'vehicles_south_left': vehicles_south_left,
-        'vehicles_east_straight': vehicles_east_straight,
-        'vehicles_east_left': vehicles_east_left,
-        'vehicles_west_straight': vehicles_west_straight,
-        'vehicles_west_left': vehicles_west_left,
-        
-        # Tiempos objetivo
-        'time_ns_straight': ns_straight_time,
-        'time_ns_left': ns_left_time,
-        'time_ns_pedestrian': ns_pedestrian_time,
-        'time_ew_straight': ew_straight_time,
-        'time_ew_left': ew_left_time,
-        'time_ew_pedestrian': ew_pedestrian_time
-    })
-    
-    print(f"Datos sintéticos generados: {data.shape}")
-    return data
-
-
-def run_traffic_light_workflow(data=None, sequence_length=8, epochs=30, batch_size=16):
-    """
-    Ejecuta el flujo completo del modelo para predicción de tiempos de semáforo
-    """
-    print("\n" + "="*70)
-    print("PREDICCIÓN DE TIEMPOS DE SEMÁFORO CON LSTM - VISOTRAF")
-    print("="*70)
-    
-    # Timestamp único para esta ejecución
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # Si no hay datos, generar sintéticos
-    if data is None:
-        data = generate_traffic_light_data(n_samples=5000)
-    
-    # Definir columnas objetivo (EXCLUYENDO PEATONALES)
-    target_columns = [
-        'time_ns_straight', 'time_ns_left',
-        'time_ew_straight', 'time_ew_left'
-    ]
-    
-    # Dividir en entrenamiento y prueba
-    train_size = int(len(data) * 0.8)
-    train_data = data[:train_size]
-    test_data = data[train_size:]
-    print(f"Datos divididos - Entrenamiento: {train_data.shape[0]}, Prueba: {test_data.shape[0]}")
-    
-    # Inicializar modelo
-    predictor = TrafficLightPredictor(sequence_length=sequence_length)
-    
-    # Preprocesar datos
-    X_train, y_train = predictor.preprocess_data(train_data, target_columns)
-    X_test, y_test = predictor.preprocess_data(test_data, target_columns)
-    
-    # Construir y entrenar modelo
-    predictor.build_model(X_train.shape, len(target_columns))
-    history = predictor.train(
-        X_train, y_train, 
-        epochs=epochs, 
-        batch_size=batch_size
-    )
-    
-    # Evaluar modelo
-    y_test_real, y_pred_real, maes, rmses, r2s = predictor.evaluate(X_test, y_test, target_columns)
-    
-    # Visualizar resultados con timestamp en el nombre
-    history_path = f'outputs/traffic_light_training_history_{timestamp}.png'
-    pred_path = f'outputs/traffic_light_predictions_{timestamp}.png'
-    predictor.plot_history(history, save_path=history_path)
-    predictor.plot_predictions(y_test_real, y_pred_real, target_columns, save_path=pred_path)
-    
-    # Guardar modelo con timestamp
-    os.makedirs('models', exist_ok=True)  # Crear directorio si no existe
-    predictor.save_model(f'models/lstm_traffic_light_model_{timestamp}.h5')
-    
-    # Ejemplo de predicción para una intersección
-    print("\n" + "="*50)
-    print("EJEMPLO DE PREDICCIÓN PARA UNA INTERSECCIÓN")
-    print("="*50)
-    
-    # Datos de entrada similares a los mostrados en la interfaz VISOTRAF
-    sample_input = {
-        'vehicles_north_straight': [8],
-        'vehicles_north_left': [3],
-        'vehicles_south_straight': [1],
-        'vehicles_south_left': [0],
-        'vehicles_east_straight': [7],
-        'vehicles_east_left': [2],
-        'vehicles_west_straight': [6], 
-        'vehicles_west_left': [2],
-        'hour_sin': [np.sin(14 * (2 * np.pi / 24))],  # 2pm
-        'hour_cos': [np.cos(14 * (2 * np.pi / 24))],
-        'day_sin': [np.sin(1 * (2 * np.pi / 7))],     # Martes
-        'day_cos': [np.cos(1 * (2 * np.pi / 7))]
-    }
-    
-    # Convertir a DataFrame
-    sample_df = pd.DataFrame(sample_input)
-    
-    # Ejemplo tabular de resultados basado en la entrada (sin peatonales)
-    print("\nResultados de predicción:")
-    print("\n| Dirección | Tipo de Movimiento | Vehículos detectados | Tiempo sugerido | Semáforo |")
-    print("|-----------|---------------------|----------------------|----------------|----------|")
-    print("| Norte-Sur | Recto               | 9                    | 28.5s          | verde    |")
-    print("| Norte-Sur | Giro izquierdo      | 3                    | 12.0s          | verde    |")
-    print("| Este-Oeste | Recto              | 13                   | 31.2s          | verde    |")
-    print("| Este-Oeste | Giro izquierdo     | 4                    | 14.5s          | verde    |")
-    
-    print("\n" + "="*70)
-    print("PROCESAMIENTO LSTM PARA SEMÁFOROS COMPLETADO")
-    print("="*70)
-    
-    return predictor
-
-
-if __name__ == "__main__":
-    print(f"Iniciando predicción LSTM para tiempos de semáforo...")
-    
-    # Ejecutar flujo de trabajo
-    model = run_traffic_light_workflow(
-        data=None,  # Usar datos sintéticos para demostración
-        sequence_length=8,  # Reducido para CPU
-        epochs=30,
-        batch_size=16
-    )
-    
-    print("\n¡Proceso completado!")
+    def predict_green_times(self, vehicle_counts):
+        return self.lstm_predictor.predict_green_times(vehicle_counts)

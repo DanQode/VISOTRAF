@@ -6,18 +6,72 @@ import csv
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
-    QLineEdit, QGridLayout, QGroupBox, QSizePolicy, QMessageBox
+    QLineEdit, QGridLayout, QGroupBox, QSizePolicy, QMessageBox, QDialog, QTextEdit
 )
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, Qt
 from src.vision_vehicular import model, vehicle_classes
-from src.prediccion_AI import TrafficPredictor
+from src.prediccion_LSTM import TrafficPredictor
 from threading import Thread, Lock
 import time
 
-
-
 DIRECCIONES = ["Norte", "Sur", "Este", "Oeste"]
+
+class PhaseSequenceDialog(QDialog):
+    """Ventana emergente para mostrar la secuencia detallada de fases"""
+    def __init__(self, cycle_sequence, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Secuencia Detallada de Fases")
+        self.resize(500, 400)
+        
+        # Configuración de estilo oscuro como el dashboard principal
+        self.setStyleSheet("""
+            QDialog { background-color: #23272A; color: #F7F7F7; }
+            QTextEdit { background-color: #2C2F33; color: #FFFFFF; border: none; font-size: 12px; }
+            QPushButton { background-color: #F1C40F; color: #23272A; font-weight: bold; border: none; 
+                        border-radius: 4px; padding: 8px 16px; }
+            QLabel { font-size: 16px; font-weight: bold; color: #F1C40F; }
+        """)
+        
+        layout = QVBoxLayout()
+        
+        # Título
+        title_label = QLabel("🚦 Secuencia Detallada del Ciclo de Semáforo")
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # Área de texto con detalles
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        
+        # Generar el texto detallado de la secuencia
+        phase_text = ""
+        for i, phase in enumerate(cycle_sequence):
+            phase_text += f"Fase {i+1}: {phase['name']}\n"
+            phase_text += f"Duración: {phase['duration']:.1f}s\n"
+            
+            if 'states' in phase:
+                phase_text += "Estados:\n"
+                for direction, state in phase['states'].items():
+                    color = "🟢" if state == "VERDE" else "🔴" if state == "ROJO" else "🟡"
+                    phase_text += f"  {direction}: {color} {state}\n"
+            phase_text += "\n"
+        
+        # Agregar información sobre restricción
+        phase_text += "\n--- Restricciones Aplicadas ---\n"
+        phase_text += "• Se permite que giros a la izquierda operen simultáneamente con flujos rectos\n"
+        phase_text += "  de dirección perpendicular, evitando conflictos viales.\n"
+        phase_text += "• Cuando Norte-Sur recto está en verde, Este-Oeste recto debe estar en rojo y viceversa.\n"
+        
+        text_edit.setText(phase_text)
+        layout.addWidget(text_edit)
+        
+        # Botón de cerrar
+        close_button = QPushButton("Cerrar")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button, alignment=Qt.AlignCenter)
+        
+        self.setLayout(layout)
 
 class VideoView(QWidget):
     def __init__(self, direccion):
@@ -234,16 +288,40 @@ class VideoDashboard(QWidget):
         self.count_box.setLayout(count_layout)
         action_layout.addWidget(self.count_box)
 
-        # Frame: Resultado VISOTRAF (delgado y alargado)
+        # Frame: Resultado VISOTRAF
         self.result_box = QGroupBox("Resultado VISOTRAF")
-        self.result_box.setMinimumWidth(180)
-        self.result_box.setMaximumWidth(200)
-        self.result_box.setMinimumHeight(300)
+        self.result_box.setMinimumWidth(200)
+        self.result_box.setMaximumWidth(250)
+        self.result_box.setMinimumHeight(350)
         self.result_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         result_layout = QVBoxLayout()
+
+        # Usamos QLabel para mostrar los tiempos óptimos
         self.result_label = QLabel("Aquí irá el resultado del análisis VISOTRAF.")
         self.result_label.setWordWrap(True)
+        self.result_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         result_layout.addWidget(self.result_label)
+
+        # Botón para mostrar la secuencia detallada
+        self.show_sequence_btn = QPushButton("Ver Secuencia de Fases")
+        self.show_sequence_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #F1C40F;
+                color: #23272A;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #F7DC6F;
+            }
+        """)
+        self.show_sequence_btn.clicked.connect(self.mostrar_secuencia_fases)
+        result_layout.addWidget(self.show_sequence_btn, alignment=Qt.AlignCenter)
+
+        # Añadir un espaciador para empujar el contenido hacia arriba
+        result_layout.addStretch()
+
         self.result_box.setLayout(result_layout)
         action_layout.addWidget(self.result_box)
 
@@ -268,6 +346,8 @@ class VideoDashboard(QWidget):
         self.timer_guardado.timeout.connect(self.guardar_conteo_periodico)
         self.timer_guardado.start(10000)  # 10,000 ms = 10 segundos
 
+        # Guardar la última secuencia de ciclo calculada
+        self.last_cycle_sequence = None
         
     def iniciar_todos(self):
         for view in self.views.values():
@@ -321,24 +401,40 @@ class VideoDashboard(QWidget):
                 f"Oeste: {conteos['Oeste']}\n"
             )
             self.count_label.setText(texto)
+            
             # --- Predicción de tiempos de semáforo ---
             predictions, cycle_sequence = self.predictor.predict_green_times(conteos)
+            
+            # Guardar la secuencia para mostrarla en la ventana emergente
+            self.last_cycle_sequence = cycle_sequence
+            
+            # Calculamos el tiempo total del ciclo
             total_cycle_time = sum(phase['duration'] for phase in cycle_sequence)
+            
+            # Formato simplificado para el dashboard
             texto_prediccion = (
-                f"Predicción de tiempos:\n\n"
+                f"TIEMPOS ÓPTIMOS:\n\n"
                 f"Norte-Sur:\n"
-                f"  Principal: {predictions['main']['ns']:.1f}s\n"
+                f"  Recto: {predictions['main']['ns']:.1f}s\n"
                 f"  Giro: {predictions['turn']['ns']:.1f}s\n\n"
                 f"Este-Oeste:\n"
-                f"  Principal: {predictions['main']['eo']:.1f}s\n"
+                f"  Recto: {predictions['main']['eo']:.1f}s\n"
                 f"  Giro: {predictions['turn']['eo']:.1f}s\n\n"
                 f"Tiempo total ciclo: {total_cycle_time:.1f}s"
             )
+            
             self.result_label.setText(texto_prediccion)
             # -----------------------------------------
             self.tiempo_restante = 10
         self.count_box.setTitle(f"Conteo de vehículos - {self.tiempo_restante}s")
-        
+    
+    def mostrar_secuencia_fases(self):
+        """Muestra la ventana emergente con la secuencia detallada de fases"""
+        if self.last_cycle_sequence:
+            dialog = PhaseSequenceDialog(self.last_cycle_sequence, self)
+            dialog.exec_()
+        else:
+            QMessageBox.information(self, "Información", "No hay datos de secuencia de fases disponibles.")
 
     def exportar_historico(self):
         archivo_origen = "conteo_vehiculos.csv"
