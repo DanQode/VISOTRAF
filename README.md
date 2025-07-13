@@ -7,7 +7,6 @@ Este repositorio contiene un modelo de inteligencia artificial que predice el ti
 1. Se generan datos simulados de flujo vehicular.
 2. Se entrena un modelo de regresión lineal.
 3. Se usa para predecir el tiempo verde óptimo.
-4. Se grafican los resultados para validación.
 
 ## Uso
 bash

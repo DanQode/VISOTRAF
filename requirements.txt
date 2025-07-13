@@ -5,7 +5,8 @@ matplotlib
 torch
 opencv-python
 ultralytics
-pythonqt5
+PyQt5
+xgboost
 
 ## Uso
 ##bash
