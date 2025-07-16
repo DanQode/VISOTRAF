@@ -1,5 +1,5 @@
 {
-  "created_at": "2025-07-16 15:09:04",
+  "created_at": "2025-07-16 14:32:31",
   "sequence_length": 8,
   "feature_names": [
     "vehicles_north_straight",
@@ -13,7 +13,9 @@
     "hour_sin",
     "hour_cos",
     "day_sin",
-    "day_cos"
+    "day_cos",
+    "time_ns_pedestrian",
+    "time_ew_pedestrian"
   ],
   "target_columns": [
     "time_ns_straight",
